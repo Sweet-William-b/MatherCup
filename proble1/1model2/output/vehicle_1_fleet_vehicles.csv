@@ -1,0 +1,4 @@
+﻿vehicle_id,pattern_id,pattern_source,used_volume_cm3,used_weight_kg,space_utilization,weight_utilization,lambda,count_G1,count_G2,count_G3,count_G4,count_G5
+1,vehicle_1_pattern_001,full,16303000,2668,0.851803,0.444667,0.444667,49,100,12,8,50
+2,vehicle_1_pattern_026,greedy_residual_2,12360000,1430,0.645788,0.238333,0.238333,30,0,18,32,0
+3,vehicle_1_pattern_020,singleton_G1,72000,12,0.003762,0.002,0.002,1,0,0,0,0

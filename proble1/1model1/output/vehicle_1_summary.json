@@ -17,6 +17,22 @@
   },
   "all_item_volume_cm3": 28735000,
   "all_item_weight_kg": 4110,
+  "residual_counts": {
+    "G1": 31,
+    "G2": 0,
+    "G3": 18,
+    "G4": 32,
+    "G5": 0
+  },
+  "repair_inserted_counts": {
+    "G1": 0,
+    "G2": 0,
+    "G3": 0,
+    "G4": 0,
+    "G5": 0
+  },
+  "repair_success": false,
+  "repair_rounds": 0,
   "validation": {
     "boundary_violations": [],
     "overlap_pairs": 0

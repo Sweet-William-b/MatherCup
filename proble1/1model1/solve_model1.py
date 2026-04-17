@@ -400,15 +400,18 @@ def generate_candidate_layers(
             )
             if layer is not None:
                 layers.append(layer)
-    unique: dict[tuple[tuple[int, int, int, int], ...], LayerCandidate] = {}
+    unique: dict[tuple[tuple[object, ...], ...], LayerCandidate] = {}
     for layer in layers:
         signature = tuple(
             sorted(
                 (
+                    placement.item_key,
+                    placement.orientation_code,
                     placement.x,
                     placement.y,
                     placement.dx,
                     placement.dy,
+                    placement.count,
                 )
                 for placement in layer.placements
             )
@@ -730,47 +733,319 @@ def alns_improve(
     return best
 
 
+def repair_priority(item_key: str) -> tuple[int, int]:
+    preferred = {
+        "G1": 0,
+        "G2": 1,
+        "G5": 2,
+        "G4": 3,
+        "G3": 4,
+    }
+    return preferred.get(item_key, 99), ITEM_INDEX[item_key]
+
+
+def build_repair_layer_for_height(
+    vehicle: VehicleType,
+    item_types: list[ItemType],
+    remaining_counts: tuple[int, ...],
+    support_rects: list[Rect],
+    height: int,
+) -> LayerCandidate | None:
+    free_rects = [Rect(rect.x, rect.y, rect.w, rect.h) for rect in support_rects]
+    if not free_rects:
+        return None
+
+    candidates: list[tuple[str, str, str, int, int, int, bool]] = []
+    for idx, item in enumerate(item_types):
+        if remaining_counts[idx] <= 0:
+            continue
+        for orientation_code, (dx, dy, dz) in orientation_map(item):
+            if dz != height:
+                continue
+            candidates.append(
+                (
+                    item.key,
+                    item.category,
+                    orientation_code,
+                    dx,
+                    dy,
+                    item.weight,
+                    item.stackable and item.category != FRAGILE,
+                )
+            )
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            repair_priority(row[0]),
+            row[3] * row[4],
+            -row[5],
+            row[2],
+        )
+    )
+
+    used_counts: Counter[str] = Counter()
+    placements: list[BlockPlacement] = []
+    while True:
+        free_rects = sorted(prune_free_rects(free_rects), key=lambda r: (r.y, r.x, -r.area))
+        placed = False
+        for rect_idx, rect in enumerate(free_rects):
+            for item_key, category, orientation_code, dx, dy, unit_weight, supportable in candidates:
+                if used_counts[item_key] >= remaining_counts[ITEM_INDEX[item_key]]:
+                    continue
+                if dx <= rect.w and dy <= rect.h:
+                    placements.append(
+                        BlockPlacement(
+                            block_key=f"repair_{item_key}_{orientation_code}_{len(placements) + 1}",
+                            item_key=item_key,
+                            category=category,
+                            orientation_code=orientation_code,
+                            x=rect.x,
+                            y=rect.y,
+                            dx=dx,
+                            dy=dy,
+                            dz=height,
+                            nx=1,
+                            ny=1,
+                            count=1,
+                            weight=unit_weight,
+                            supportable=supportable,
+                            offsets=((0, 0, 0),),
+                        )
+                    )
+                    used_counts[item_key] += 1
+                    selected = free_rects.pop(rect_idx)
+                    free_rects.extend(split_rect(selected, dx, dy))
+                    placed = True
+                    break
+            if placed:
+                break
+        if not placed:
+            break
+
+    if not placements:
+        return None
+
+    counts_tuple = [0] * len(ITEM_ORDER)
+    total_volume = 0
+    total_weight = 0
+    fragile = False
+    covered_area = 0
+    for placement in placements:
+        counts_tuple[ITEM_INDEX[placement.item_key]] += placement.count
+        total_volume += placement.dx * placement.dy * placement.dz
+        total_weight += placement.weight
+        covered_area += placement.dx * placement.dy
+        fragile = fragile or placement.category == FRAGILE
+
+    score_hint = min(total_volume / vehicle.volume, total_weight / vehicle.max_weight)
+    return LayerCandidate(
+        key=f"{vehicle.key}_repair_h{height}_{len(placements)}",
+        height=height,
+        volume=total_volume,
+        weight=total_weight,
+        placements=tuple(placements),
+        counts=tuple(counts_tuple),
+        score_hint=score_hint,
+        coverage_ratio=covered_area / max(1, vehicle.floor_area),
+        has_fragile=fragile,
+    )
+
+
+def build_best_repair_layer(
+    vehicle: VehicleType,
+    item_types: list[ItemType],
+    remaining_counts: tuple[int, ...],
+    support_rects: list[Rect],
+    height_limit: int,
+) -> LayerCandidate | None:
+    feasible_heights = sorted(
+        {
+            dims[2]
+            for idx, item in enumerate(item_types)
+            if remaining_counts[idx] > 0
+            for _, dims in orientation_map(item)
+            if dims[2] <= height_limit
+        }
+    )
+    best_layer: LayerCandidate | None = None
+    for height in feasible_heights:
+        layer = build_repair_layer_for_height(
+            vehicle,
+            item_types,
+            remaining_counts,
+            support_rects,
+            height,
+        )
+        if layer is None:
+            continue
+        if best_layer is None or (
+            layer.score_hint,
+            layer.weight,
+            layer.volume,
+            sum(layer.counts),
+        ) > (
+            best_layer.score_hint,
+            best_layer.weight,
+            best_layer.volume,
+            sum(best_layer.counts),
+        ):
+            best_layer = layer
+    return best_layer
+
+
+def apply_local_insertion_repair(
+    vehicle: VehicleType,
+    item_types: list[ItemType],
+    solution: SearchResult,
+    initial_counts: tuple[int, ...],
+) -> tuple[SearchResult, dict[str, object]]:
+    current_layers = list(solution.layers)
+    remaining_counts_state = solution.remaining_counts
+    inserted_counts = [0] * len(ITEM_ORDER)
+    rounds = 0
+
+    while sum(remaining_counts_state) > 0:
+        remaining_h = vehicle.effective_height - sum(layer.height for layer in current_layers)
+        if remaining_h <= 0:
+            break
+        if current_layers:
+            top_layer = current_layers[-1]
+            support_rects = [
+                Rect(placement.x, placement.y, placement.dx, placement.dy)
+                for placement in top_layer.placements
+                if placement.supportable
+            ]
+        else:
+            support_rects = [Rect(0, 0, vehicle.length, vehicle.width)]
+        if not support_rects:
+            break
+
+        repair_layer = build_best_repair_layer(
+            vehicle,
+            item_types,
+            remaining_counts_state,
+            support_rects,
+            remaining_h,
+        )
+        if repair_layer is None:
+            break
+
+        current_layers.append(repair_layer)
+        for idx, value in enumerate(repair_layer.counts):
+            inserted_counts[idx] += value
+        remaining_counts_state = subtract_counts(remaining_counts_state, repair_layer.counts)
+        rounds += 1
+        if rounds >= 6:
+            break
+
+    repaired_metrics = score_from_remaining(vehicle, item_types, initial_counts, remaining_counts_state)
+    repaired_solution = SearchResult(
+        score=repaired_metrics[0],
+        used_volume=repaired_metrics[1],
+        used_weight=repaired_metrics[2],
+        remaining_counts=remaining_counts_state,
+        layers=current_layers,
+    )
+    repair_summary = {
+        "residual_counts": {item_key: remaining_counts_state[ITEM_INDEX[item_key]] for item_key in ITEM_ORDER},
+        "repair_inserted_counts": {item_key: inserted_counts[ITEM_INDEX[item_key]] for item_key in ITEM_ORDER},
+        "repair_success": sum(inserted_counts) > 0,
+        "repair_rounds": rounds,
+    }
+    return repaired_solution, repair_summary
+
+
 def expand_solution_rows(
     vehicle: VehicleType,
     layers: list[LayerCandidate],
     item_types: list[ItemType],
 ) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    serial_by_item: Counter[str] = Counter()
-    block_serial = 0
+    block_rows: list[dict[str, object]] = []
     z_cursor = 0
+    block_serial = 0
+
     for layer_id, layer in enumerate(layers, 1):
         for placement in layer.placements:
             block_serial += 1
-            support_id = "floor" if layer_id == 1 else f"L{layer_id - 1}_block"
-            base_item = next(item for item in item_types if item.key == placement.item_key)
-            single_dx = placement.dx // placement.nx
-            single_dy = placement.dy // placement.ny
-            for offset_x, offset_y, offset_z in placement.offsets:
-                serial_by_item[placement.item_key] += 1
-                item_uid = f"{placement.item_key}_{serial_by_item[placement.item_key]:03d}"
-                rows.append(
-                    {
-                        "vehicle_id": 1,
-                        "vehicle_key": vehicle.key,
-                        "vehicle_label": vehicle.label,
-                        "item_uid": item_uid,
-                        "item_type": placement.item_key,
-                        "x": placement.x + offset_x,
-                        "y": placement.y + offset_y,
-                        "z": z_cursor + offset_z,
-                        "dx": single_dx,
-                        "dy": single_dy,
-                        "dz": placement.dz,
-                        "orientation_code": placement.orientation_code,
-                        "layer_id": layer_id,
-                        "support_id": support_id,
-                        "block_id": f"block_{block_serial}",
-                        "category": placement.category,
-                        "unit_weight": base_item.weight,
-                    }
-                )
+            block_rows.append(
+                {
+                    "layer_id": layer_id,
+                    "z_start": z_cursor,
+                    "block_id": f"block_{block_serial}",
+                    "placement": placement,
+                }
+            )
         z_cursor += layer.height
+
+    for idx, block_row in enumerate(block_rows):
+        placement = block_row["placement"]
+        layer_id = block_row["layer_id"]
+        if layer_id == 1:
+            block_row["support_id"] = "floor"
+            block_row["support_area_ratio"] = 1.0
+            continue
+
+        current_rect = Rect(placement.x, placement.y, placement.dx, placement.dy)
+        support_ids: list[str] = []
+        support_area = 0
+        for lower_row in block_rows:
+            if lower_row["layer_id"] != layer_id - 1:
+                continue
+            lower_placement = lower_row["placement"]
+            if not lower_placement.supportable:
+                continue
+            overlap_x1 = max(current_rect.x, lower_placement.x)
+            overlap_y1 = max(current_rect.y, lower_placement.y)
+            overlap_x2 = min(current_rect.x + current_rect.w, lower_placement.x + lower_placement.dx)
+            overlap_y2 = min(current_rect.y + current_rect.h, lower_placement.y + lower_placement.dy)
+            if overlap_x1 >= overlap_x2 or overlap_y1 >= overlap_y2:
+                continue
+            support_ids.append(lower_row["block_id"])
+            support_area += (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1)
+
+        base_area = max(1, current_rect.area)
+        block_row["support_id"] = "|".join(support_ids) if support_ids else f"L{layer_id - 1}_unsupported"
+        block_row["support_area_ratio"] = round(min(1.0, support_area / base_area), 6)
+
+    rows: list[dict[str, object]] = []
+    serial_by_item: Counter[str] = Counter()
+    for block_row in block_rows:
+        layer_id = block_row["layer_id"]
+        z_start = block_row["z_start"]
+        placement = block_row["placement"]
+        base_item = next(item for item in item_types if item.key == placement.item_key)
+        support_id = block_row["support_id"]
+        support_area_ratio = block_row["support_area_ratio"]
+        block_id = block_row["block_id"]
+        single_dx = placement.dx // placement.nx
+        single_dy = placement.dy // placement.ny
+        for offset_x, offset_y, offset_z in placement.offsets:
+            serial_by_item[placement.item_key] += 1
+            item_uid = f"{placement.item_key}_{serial_by_item[placement.item_key]:03d}"
+            rows.append(
+                {
+                    "vehicle_id": 1,
+                    "vehicle_key": vehicle.key,
+                    "vehicle_label": vehicle.label,
+                    "item_uid": item_uid,
+                    "item_type": placement.item_key,
+                    "x": placement.x + offset_x,
+                    "y": placement.y + offset_y,
+                    "z": z_start + offset_z,
+                    "dx": single_dx,
+                    "dy": single_dy,
+                    "dz": placement.dz,
+                    "orientation_code": placement.orientation_code,
+                    "layer_id": layer_id,
+                    "support_id": support_id,
+                    "support_area_ratio": support_area_ratio,
+                    "block_id": block_id,
+                    "category": placement.category,
+                    "unit_weight": base_item.weight,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -814,11 +1089,13 @@ def solve_vehicle(vehicle: VehicleType, item_types: list[ItemType]) -> tuple[pd.
     candidate_layers = generate_candidate_layers(vehicle, item_types, initial_counter, extra_random_layers=2)
     base_solution = solve_exact_layer_stack(vehicle, item_types, candidate_layers, initial_counts)
     improved = alns_improve(vehicle, item_types, base_solution, initial_counts, iterations=50)
-    item_rows = expand_solution_rows(vehicle, improved.layers, item_types)
+    repaired, repair_summary = apply_local_insertion_repair(vehicle, item_types, improved, initial_counts)
+    item_rows = expand_solution_rows(vehicle, repaired.layers, item_types)
     validation = validate_items(item_rows, vehicle)
-    summary = evaluate_solution(vehicle, item_types, improved)
+    summary = evaluate_solution(vehicle, item_types, repaired)
+    summary.update(repair_summary)
     summary["validation"] = validation
-    layer_rows = pd.DataFrame(summarize_layers(improved.layers))
+    layer_rows = pd.DataFrame(summarize_layers(repaired.layers))
     return item_rows, summary, layer_rows
 
 

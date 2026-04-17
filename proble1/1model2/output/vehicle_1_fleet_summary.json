@@ -1,0 +1,33 @@
+{
+  "vehicle_key": "vehicle_1",
+  "vehicle_label": "车型1",
+  "vehicle_trip_cost": 450,
+  "vehicle_count": 3,
+  "total_transport_cost": 1350,
+  "demand_counts": {
+    "G1": 80,
+    "G2": 100,
+    "G3": 30,
+    "G4": 40,
+    "G5": 50
+  },
+  "delivered_counts": {
+    "G1": 80,
+    "G2": 100,
+    "G3": 30,
+    "G4": 40,
+    "G5": 50
+  },
+  "vehicle_volume_cm3": 19139400,
+  "vehicle_weight_capacity_kg": 6000,
+  "avg_space_utilization": 0.500451,
+  "avg_weight_utilization": 0.228333,
+  "total_used_volume_cm3": 28735000,
+  "total_used_weight_kg": 4110,
+  "exact_cover": true,
+  "selected_pattern_ids": [
+    "vehicle_1_pattern_001",
+    "vehicle_1_pattern_026",
+    "vehicle_1_pattern_020"
+  ]
+}
