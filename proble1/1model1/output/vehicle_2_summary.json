@@ -1,0 +1,24 @@
+{
+  "vehicle_key": "vehicle_2",
+  "vehicle_label": "车型2",
+  "vehicle_volume_cm3": 41150200,
+  "vehicle_weight_capacity_kg": 10000,
+  "used_volume_cm3": 17767000,
+  "used_weight_kg": 2882,
+  "space_utilization": 0.43176,
+  "weight_utilization": 0.2882,
+  "lambda": 0.2882,
+  "loaded_item_counts": {
+    "G1": 61,
+    "G2": 100,
+    "G3": 30,
+    "G4": 0,
+    "G5": 50
+  },
+  "all_item_volume_cm3": 28735000,
+  "all_item_weight_kg": 4110,
+  "validation": {
+    "boundary_violations": [],
+    "overlap_pairs": 0
+  }
+}

@@ -1,0 +1,4 @@
+﻿layer_id,layer_key,z_start,height,weight,volume_cm3,coverage_ratio,has_fragile
+1,vehicle_2_h60_heavy_60_32,0,60,1632,9192000,0.9196,False
+2,vehicle_2_h35_heavy_35_26,60,35,800,4375000,0.7503,False
+3,vehicle_2_h70_randomized_7000_15,95,70,450,4200000,0.3601,True
