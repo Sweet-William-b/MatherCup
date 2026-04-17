@@ -494,6 +494,33 @@ vehicle_id,item_uid,item_type,x,y,z,dx,dy,dz,orientation_code,layer_id,support_i
 1. 明细结果表：一行一件货物，供程序校验、三维绘图和附录展示使用。
 2. 汇总结果表：按车辆统计已装件数、空间利用率、载重利用率、综合满载率，供论文正文展示使用。
 
+推荐的汇总结果表字段如下：
+
+| 字段名 | 含义 |
+|---|---|
+| `vehicle_volume_cm3` | 车厢有效体积 |
+| `vehicle_weight_capacity_kg` | 载重上限 |
+| `used_volume_cm3` | 已装体积 |
+| `used_weight_kg` | 已装重量 |
+| `space_utilization` | 空间利用率 |
+| `weight_utilization` | 载重利用率 |
+| `lambda` | 综合满载率 |
+| `loaded_item_counts` | 各类货物装入件数 |
+
+其中：
+
+- `space_utilization = used_volume_cm3 / vehicle_volume_cm3`
+- `weight_utilization = used_weight_kg / vehicle_weight_capacity_kg`
+- `lambda = min(space_utilization, weight_utilization)`
+
+若程序中同时输出可行性校验信息，也建议在汇总表或汇总 JSON 中增加：
+
+- `validation`
+  - `boundary_violations`：越界货物列表
+  - `overlap_pairs`：货物重叠对数
+
+这样可以使论文中的结果表、程序输出和约束校验保持一致。
+
 ### Step 8：结果评价
 
 - 空间利用率
@@ -501,6 +528,34 @@ vehicle_id,item_uid,item_type,x,y,z,dx,dy,dz,orientation_code,layer_id,support_i
 - 综合满载率
 - 货物类型分布
 - 重货/泡货搭配情况
+
+若采用当前目录下 `proble1/1model1/solve_model1.py` 的基线实现，则可直接引用如下结果：
+
+### 车型1 当前结果
+
+- 空间利用率：`0.851803`
+- 载重利用率：`0.444667`
+- 综合满载率：`0.444667`
+- 货物类型分布：`G1=49, G2=100, G3=12, G4=8, G5=50`
+- 重货/泡货搭配情况：
+  - 重货按密度较高的 `G1、G2、G5` 统计，共 `199` 件，`2288 kg`，`12703000 cm3`
+  - 泡货按密度较低的 `G3、G4` 统计，共 `20` 件，`380 kg`，`3600000 cm3`
+
+### 车型2 当前结果
+
+- 空间利用率：`0.431760`
+- 载重利用率：`0.288200`
+- 综合满载率：`0.288200`
+- 货物类型分布：`G1=61, G2=100, G3=30, G4=0, G5=50`
+- 重货/泡货搭配情况：
+  - 重货按密度较高的 `G1、G2、G5` 统计，共 `211` 件，`2432 kg`，`13567000 cm3`
+  - 泡货按密度较低的 `G3、G4` 统计，共 `30` 件，`450 kg`，`4200000 cm3`
+
+上述结果说明：
+
+- 车型1 的空间利用率更高，说明其车厢空间被填充得更紧凑。
+- 车型2 的可用空间更大，但当前基线实现下仍存在较多未利用空间，后续可通过更强的候选层生成或局部精确排布进一步提升。
+- 两种车型下均体现出“重货 + 泡货”混装的基本特征，但当前方案整体仍偏向重货占比更高。
 
 ---
 
@@ -546,104 +601,7 @@ vehicle_id,item_uid,item_type,x,y,z,dx,dy,dz,orientation_code,layer_id,support_i
 
 ---
 
-## 九、代码实现建议
-
-建议按模块编写，便于调试和复用。
-
-### 1. `data_loader`
-
-负责：
-
-- 读取附件数据
-- 标准化单位
-- 输出车辆与货物对象
-
-### 2. `orientation_manager`
-
-负责：
-
-- 生成货物合法姿态
-- 过滤非法翻转
-
-### 3. `block_generator`
-
-负责：
-
-- 生成候选块
-- 计算块属性
-
-### 4. `layer_builder`
-
-负责：
-
-- 按高度分组
-- 用二维精确/启发式方法生成候选层
-
-### 5. `master_optimizer`
-
-负责：
-
-- 建立层组合主模型
-- 调用 CP-SAT 或 MIP 求解
-
-### 6. `alns_solver`
-
-负责：
-
-- Destroy/Repair 操作
-- 接受准则
-- 自适应权重更新
-
-### 7. `solution_decoder`
-
-负责：
-
-- 将层级结果转为块坐标
-- 将块坐标拆分为单件坐标
-
-### 8. `evaluator`
-
-负责：
-
-- 计算体积利用率
-- 计算重量利用率
-- 计算综合满载率
-- 检查约束可行性
-
----
-
-## 十、推荐伪代码
-
-```text
-Input: vehicle, item_types
-Output: packing_plan, Uv, Uw, lambda
-
-1. items <- preprocess(item_types)
-2. blocks <- generate_superitems(items)
-3. layers <- []
-4. for each feasible height group:
-5.     layer_candidates <- build_layers_by_2d_packing(blocks_of_same_height)
-6.     layers <- layers U layer_candidates
-7. initial_solution <- solve_master_problem(layers, vehicle)
-8. best_solution <- initial_solution
-9. current_solution <- initial_solution
-10. initialize ALNS operator weights
-11. while termination condition not met:
-12.     partial_solution <- destroy(current_solution)
-13.     repaired_solution <- repair(partial_solution, layers, vehicle)
-14.     if accept(repaired_solution, current_solution):
-15.         current_solution <- repaired_solution
-16.     if repaired_solution better than best_solution:
-17.         best_solution <- repaired_solution
-18.     update operator weights
-19. packing_plan <- decode_to_item_coordinates(best_solution)
-20. evaluate packing_plan
-21. return packing_plan, Uv, Uw, lambda
-```
-
----
-
-## 十一、回答问题时的写作要求
+## 九、回答问题时的写作要求
 
 当你作为该 Agent 输出解法时，请遵守以下要求：
 
@@ -679,7 +637,7 @@ Output: packing_plan, Uv, Uw, lambda
 
 ---
 
-## 十二、可直接用于论文中的总结语
+## 十、可直接用于论文中的总结语
 
 可直接写为：
 
@@ -687,7 +645,7 @@ Output: packing_plan, Uv, Uw, lambda
 
 ---
 
-## 十三、Agent 最终目标
+## 十一、Agent 最终目标
 
 你的最终输出应达到以下标准：
 
